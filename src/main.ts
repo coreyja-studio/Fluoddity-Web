@@ -313,6 +313,7 @@ async function start(): Promise<void> {
   // app reads it; it exists so "drag does nothing on my phone" comes back as
   // "pointercancel right after the second move" instead of a shrug.
   let renderInputTape: ((verdict: string) => void) | null = null;
+  let trackerTransition: ((line: string) => void) | null = null;
   if (params.has('inputdebug')) {
     const inputTape = document.createElement('pre');
     inputTape.style.cssText =
@@ -331,21 +332,30 @@ async function start(): Promise<void> {
       return `${target.tagName.toLowerCase()}${cls ? `.${cls}` : ''}`;
     };
     const lines: string[] = [];
+    const pushLine = (line: string, collapse = false): void => {
+      if (collapse && lines[0]?.startsWith(line.split(' ')[0] ?? '')) lines[0] = line;
+      else lines.unshift(line);
+      lines.length = Math.min(lines.length, 8);
+    };
     for (const type of ['pointerdown', 'pointermove', 'pointerup', 'pointercancel'] as const) {
       window.addEventListener(
         type,
         (ev: PointerEvent) => {
-          const line =
+          pushLine(
             `${type} ${ev.pointerType} #${ev.pointerId} ` +
-            `${Math.round(ev.clientX)},${Math.round(ev.clientY)} on ${describe(ev.target)}`;
-          // Collapse runs of moves so a drag does not scroll everything away.
-          if (type === 'pointermove' && lines[0]?.startsWith('pointermove')) lines[0] = line;
-          else lines.unshift(line);
-          lines.length = Math.min(lines.length, 6);
+              `${Math.round(ev.clientX)},${Math.round(ev.clientY)} on ${describe(ev.target)}`,
+            // Collapse runs of moves so a drag does not scroll everything away.
+            type === 'pointermove',
+          );
         },
         true,
       );
     }
+    // The frame loop pushes LATCHED tracker transitions through this: the
+    // live `drag=` readout is false again by the time anyone screenshots, so
+    // whether the tracker ever fired mid-gesture has to be recorded, not
+    // sampled.
+    trackerTransition = pushLine;
     renderInputTape = (verdict: string): void => {
       inputTape.textContent = `${verdict}\n${lines.join('\n')}`;
     };
@@ -354,6 +364,8 @@ async function start(): Promise<void> {
 
   const overlay = createDebugOverlay();
   let lastTime = performance.now();
+  let wasDragging = false;
+  let hadPinch = false;
   let firstFrame = true;
   let frameMs = 0;
   // Smoothed like frameMs: a raw per-frame delta is too noisy to read.
@@ -397,6 +409,12 @@ async function start(): Promise<void> {
     panel?.refresh(orchestrator.status(), frameInput);
 
     if (renderInputTape !== null) {
+      if (frameInput.leftDragging && !wasDragging) trackerTransition?.('== TRACKER: DRAG START ==');
+      if (!frameInput.leftDragging && wasDragging) trackerTransition?.('== TRACKER: DRAG END ==');
+      if (frameInput.leftPressed) trackerTransition?.('== TRACKER: TAP ==');
+      if (frameInput.pinch !== null && !hadPinch) trackerTransition?.('== TRACKER: PINCH START ==');
+      wasDragging = frameInput.leftDragging;
+      hadPinch = frameInput.pinch !== null;
       const p = frameInput.pinch;
       // `vv` is the pinch-zoom scale of the PAGE itself: anything other than
       // 1.00 means iOS is panning a zoomed viewport instead of delivering
