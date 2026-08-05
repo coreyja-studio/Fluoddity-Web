@@ -320,12 +320,24 @@ async function start(): Promise<void> {
       'font:11px/1.4 ui-monospace,monospace;color:#ff0;background:rgba(0,0,0,.7);' +
       'pointer-events:none;white-space:pre;';
     document.body.append(inputTape);
+    // The TARGET is the payload: the tracker drops any press whose hit-test
+    // did not say "canvas", so an invisible element over the canvas shows up
+    // here as its name where `#app` should be -- the exact thing a screenshot
+    // of the app cannot reveal.
+    const describe = (target: EventTarget | null): string => {
+      if (!(target instanceof Element)) return '?';
+      if (target.id !== '') return `#${target.id}`;
+      const cls = typeof target.className === 'string' ? target.className.split(' ')[0] : '';
+      return `${target.tagName.toLowerCase()}${cls ? `.${cls}` : ''}`;
+    };
     const lines: string[] = [];
     for (const type of ['pointerdown', 'pointermove', 'pointerup', 'pointercancel'] as const) {
       window.addEventListener(
         type,
         (ev: PointerEvent) => {
-          const line = `${type} ${ev.pointerType} #${ev.pointerId} ${Math.round(ev.clientX)},${Math.round(ev.clientY)}`;
+          const line =
+            `${type} ${ev.pointerType} #${ev.pointerId} ` +
+            `${Math.round(ev.clientX)},${Math.round(ev.clientY)} on ${describe(ev.target)}`;
           // Collapse runs of moves so a drag does not scroll everything away.
           if (type === 'pointermove' && lines[0]?.startsWith('pointermove')) lines[0] = line;
           else lines.unshift(line);
@@ -386,9 +398,13 @@ async function start(): Promise<void> {
 
     if (renderInputTape !== null) {
       const p = frameInput.pinch;
+      // `vv` is the pinch-zoom scale of the PAGE itself: anything other than
+      // 1.00 means iOS is panning a zoomed viewport instead of delivering
+      // drags, and no amount of event handling can win that.
       renderInputTape(
         `drag=${frameInput.leftDragging} press=${frameInput.leftPressed} ` +
-          `pinch=${p === null ? '-' : `pan ${p.panPixels.map(Math.round)} z ${p.zoomFactor.toFixed(2)}`}`,
+          `pinch=${p === null ? '-' : `pan ${p.panPixels.map(Math.round)} z ${p.zoomFactor.toFixed(2)}`} ` +
+          `vv=${(window.visualViewport?.scale ?? 1).toFixed(2)}`,
       );
     }
 

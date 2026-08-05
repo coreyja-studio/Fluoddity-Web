@@ -13,6 +13,14 @@
         height: 100%;
         overflow: hidden;
         background: #000;
+
+        /* iOS: `overflow: hidden` famously does not stop body rubber-band
+           scrolling, and a pinch-zoomed PAGE pans with one finger at the
+           system level -- delivering no events to the app at all, which reads
+           as "every drag tool is dead". Declare the whole document
+           gesture-free; the panel manages its own scrolling regions. */
+        touch-action: none;
+        overscroll-behavior: none;
       }
 
       /* The canvas fills the viewport in CSS pixels; its backing store is sized

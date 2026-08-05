@@ -280,22 +280,31 @@ export function bindInput(opts: InputBindingOptions): {
   };
 
   /**
-   * The raw touch events, defaults prevented.
+   * The raw `touchmove`, defaults prevented -- ON THE DOCUMENT, selectively.
    *
-   * `touch-action: none` SHOULD make these redundant, and in Chromium it does.
-   * WebKit is the reason they exist: its native gesture recognizers -- rubber-
-   * band scrolling, the text loupe, double-tap smart zoom -- can still engage
-   * mid-stream and reclaim the touch as a `pointercancel`, and its honouring
-   * of `touch-action` has been version-dependent for years. Preventing the
-   * default on the RAW events is the layer those recognizers actually listen
-   * to: with it, they never engage and the pointer stream cannot be stolen.
-   * Every serious canvas app on iOS ends up wearing this belt; `{ passive:
-   * false }` at registration is what makes the `preventDefault` legal.
+   * `touch-action: none` SHOULD make this redundant, and in Chromium it is.
+   * WebKit is the reason it exists: its honouring of `touch-action` has been
+   * version-dependent for years, and two of its native behaviours read as
+   * "every drag tool is dead" -- body rubber-band scrolling (which
+   * `overflow: hidden` famously does not stop on iOS), and PAGE pinch-zoom,
+   * which once engaged pans the visual viewport with a single finger at the
+   * system level, delivering nothing to the app at all.
    *
-   * On the CANVAS, not the window, so the panel's own scrolling is untouched.
+   * Document-level because the page-zoom pinch does not care where it starts:
+   * two fingers on the PANEL would zoom the page just as thoroughly, and a
+   * canvas-only listener cannot see them. The conditions keep the panel
+   * usable: a lone finger on panel DOM keeps its default (Tweakpane's own
+   * scrolling regions), while anything multi-touch, and anything on the
+   * canvas, is the app's.
+   *
+   * `touchmove` only -- NOT `touchstart`. WebKit derives its pointer events
+   * from the touch stream, and cancelling the start of that stream is the
+   * variant with a history of side effects (killing compatibility events and
+   * focus among them). Scroll and zoom recognizers engage on MOVEMENT, so
+   * preventing the moves is sufficient and strictly less invasive.
    */
   const onTouchRaw = (event: TouchEvent): void => {
-    event.preventDefault();
+    if (event.touches.length >= 2 || event.target === canvas) event.preventDefault();
   };
 
   /**
@@ -315,11 +324,12 @@ export function bindInput(opts: InputBindingOptions): {
   canvas.addEventListener('pointerdown', onPointerDown);
   canvas.addEventListener('wheel', onWheel, { passive: false });
   canvas.addEventListener('contextmenu', onContextMenu);
-  canvas.addEventListener('gesturestart', onGesture);
-  canvas.addEventListener('gesturechange', onGesture);
-  canvas.addEventListener('gestureend', onGesture);
-  canvas.addEventListener('touchstart', onTouchRaw, { passive: false });
-  canvas.addEventListener('touchmove', onTouchRaw, { passive: false });
+  // Window, not canvas: Safari's page-zoom pinch fires these wherever the
+  // fingers happen to be, panel included, and a zoomed page breaks every tool.
+  window.addEventListener('gesturestart', onGesture);
+  window.addEventListener('gesturechange', onGesture);
+  window.addEventListener('gestureend', onGesture);
+  document.addEventListener('touchmove', onTouchRaw, { passive: false });
   window.addEventListener('pointerup', onPointerUp);
   window.addEventListener('pointercancel', onPointerCancel);
   window.addEventListener('pointermove', onPointerMove);
@@ -333,11 +343,10 @@ export function bindInput(opts: InputBindingOptions): {
       canvas.removeEventListener('pointerdown', onPointerDown);
       canvas.removeEventListener('wheel', onWheel);
       canvas.removeEventListener('contextmenu', onContextMenu);
-      canvas.removeEventListener('gesturestart', onGesture);
-      canvas.removeEventListener('gesturechange', onGesture);
-      canvas.removeEventListener('gestureend', onGesture);
-      canvas.removeEventListener('touchstart', onTouchRaw);
-      canvas.removeEventListener('touchmove', onTouchRaw);
+      window.removeEventListener('gesturestart', onGesture);
+      window.removeEventListener('gesturechange', onGesture);
+      window.removeEventListener('gestureend', onGesture);
+      document.removeEventListener('touchmove', onTouchRaw);
       window.removeEventListener('pointerup', onPointerUp);
       window.removeEventListener('pointercancel', onPointerCancel);
       window.removeEventListener('pointermove', onPointerMove);
