@@ -126,11 +126,15 @@ export function bindInput(opts: InputBindingOptions): {
 
   const onPointerDown = (event: PointerEvent): void => {
     const captured = capturedByUi(event);
-    if (!captured) {
-      // The drag keeps receiving move/up events even when the cursor leaves the
-      // canvas, which is the DOM's version of "a drag belongs to whoever
-      // received the press". The tracker enforces that too; this makes the
-      // browser cooperate rather than relying on the window listeners alone.
+    // MOUSE AND PEN ONLY -- deliberately NOT for touch. The drag keeps
+    // receiving move/up events even when the cursor leaves the canvas, which
+    // is the DOM's version of "a drag belongs to whoever received the press".
+    // Touch pointers already have that: the spec gives them IMPLICIT capture
+    // to the element the press landed on, so the explicit call adds nothing --
+    // and Safari has a history of mishandling explicit capture on touch
+    // pointers, up to and including breaking the move stream. Redundant plus
+    // risky on the one platform that is all touches earns an exclusion.
+    if (!captured && !isTouch(event)) {
       canvas.setPointerCapture(event.pointerId);
     }
     if (isTouch(event)) {
@@ -276,6 +280,25 @@ export function bindInput(opts: InputBindingOptions): {
   };
 
   /**
+   * The raw touch events, defaults prevented.
+   *
+   * `touch-action: none` SHOULD make these redundant, and in Chromium it does.
+   * WebKit is the reason they exist: its native gesture recognizers -- rubber-
+   * band scrolling, the text loupe, double-tap smart zoom -- can still engage
+   * mid-stream and reclaim the touch as a `pointercancel`, and its honouring
+   * of `touch-action` has been version-dependent for years. Preventing the
+   * default on the RAW events is the layer those recognizers actually listen
+   * to: with it, they never engage and the pointer stream cannot be stolen.
+   * Every serious canvas app on iOS ends up wearing this belt; `{ passive:
+   * false }` at registration is what makes the `preventDefault` legal.
+   *
+   * On the CANVAS, not the window, so the panel's own scrolling is untouched.
+   */
+  const onTouchRaw = (event: TouchEvent): void => {
+    event.preventDefault();
+  };
+
+  /**
    * Safari's proprietary pinch events (`gesturestart`/`change`/`end`).
    *
    * `touch-action: none` (index.html) is what actually keeps the browser's
@@ -295,6 +318,8 @@ export function bindInput(opts: InputBindingOptions): {
   canvas.addEventListener('gesturestart', onGesture);
   canvas.addEventListener('gesturechange', onGesture);
   canvas.addEventListener('gestureend', onGesture);
+  canvas.addEventListener('touchstart', onTouchRaw, { passive: false });
+  canvas.addEventListener('touchmove', onTouchRaw, { passive: false });
   window.addEventListener('pointerup', onPointerUp);
   window.addEventListener('pointercancel', onPointerCancel);
   window.addEventListener('pointermove', onPointerMove);
@@ -311,6 +336,8 @@ export function bindInput(opts: InputBindingOptions): {
       canvas.removeEventListener('gesturestart', onGesture);
       canvas.removeEventListener('gesturechange', onGesture);
       canvas.removeEventListener('gestureend', onGesture);
+      canvas.removeEventListener('touchstart', onTouchRaw);
+      canvas.removeEventListener('touchmove', onTouchRaw);
       window.removeEventListener('pointerup', onPointerUp);
       window.removeEventListener('pointercancel', onPointerCancel);
       window.removeEventListener('pointermove', onPointerMove);

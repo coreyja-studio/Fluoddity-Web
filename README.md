@@ -757,13 +757,25 @@ deserves its own decision rather than three ad-hoc ones.
 The keyboard half of navigation (WASD, Q/E) has no touch equivalent and needs
 none: the two-finger gesture *is* pan and zoom.
 
-Two platform notes, both load-bearing: `#app` carries `touch-action: none`
+Three platform notes, all load-bearing: `#app` carries `touch-action: none`
 (index.html), without which the browser claims every drag for scrolling and
 delivers `pointercancel` instead of a stroke — this single property is what
-makes touch input possible at all. And `pointercancel` is routed as a release
-that **fires no tap**: the platform chose that lift, not the user, and a pick
-adopting a rule from a gesture the system reclaimed would be a selection
-nobody made.
+makes touch input possible at all. The canvas *also* prevents default on the
+raw `touchstart`/`touchmove` events, because WebKit's honouring of
+`touch-action` is version-dependent and its native recognizers (rubber-band
+scroll, the loupe, smart zoom) can otherwise reclaim a touch mid-stream —
+Chromium never needs this, Safari is why it exists. And `pointercancel` is
+routed as a release that **fires no tap**: the platform chose that lift, not
+the user, and a pick adopting a rule from a gesture the system reclaimed would
+be a selection nobody made.
+
+Two triage tools, because a phone has no DevTools: `touch-harness.html` (dev
+server only) mounts the real `bindInput`/`InputTracker` with no GPU and logs
+every raw pointer event beside the tracker's per-frame verdict — drive it with
+synthesized touches to test the input layer on a machine with no touchscreen.
+And `?inputdebug` overlays the same tape on the running app, so "drag does
+nothing on my phone" comes back as "`pointercancel` after the second move"
+instead of a shrug.
 
 ### The hotkey table, and its deliberate divergence
 

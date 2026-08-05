@@ -1,0 +1,71 @@
+<!doctype html>
+<!-- Input-layer test harness: bindInput + InputTracker with NO WebGPU.
+     Served by the dev server only; not part of the build. Drive it with
+     synthesized touch/pointer events and read window.__log / #out. -->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>touch harness</title>
+    <style>
+      html, body { margin: 0; height: 100%; overflow: hidden; }
+      #app {
+        display: block; width: 800px; height: 600px; background: #123;
+        touch-action: none;
+        -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
+      }
+      #out { font: 11px monospace; white-space: pre; }
+    </style>
+  </head>
+  <body>
+    <canvas id="app" width="800" height="600"></canvas>
+    <pre id="out"></pre>
+    <script type="module">
+      import { bindInput } from '/src/ui/inputBinding.ts';
+
+      const canvas = document.getElementById('app');
+      const log = [];
+      window.__log = log;
+
+      // Raw event taps, so a missing or cancelled event is visible even if the
+      // tracker never hears about it.
+      for (const type of ['pointerdown', 'pointermove', 'pointerup', 'pointercancel']) {
+        window.addEventListener(type, (ev) => {
+          if (type === 'pointermove' && log.at(-1)?.raw === 'pointermove') return; // collapse runs
+          log.push({ raw: type, ptype: ev.pointerType, id: ev.pointerId, x: ev.clientX, y: ev.clientY });
+        }, true);
+      }
+
+      const surface = { canvas, size: () => [800, 600] };
+      const { tracker } = bindInput({
+        surface,
+        dispatch: (c) => log.push({ dispatch: c.kind ?? String(c) }),
+        toggleUi: () => {},
+        copyShareLink: () => {},
+        pasteShareLink: () => {},
+      });
+
+      let prev = '';
+      const frame = () => {
+        const s = tracker.freeze(1 / 60);
+        const line = JSON.stringify({
+          press: s.leftPressed, drag: s.leftDragging,
+          pos: s.mousePos.map(Math.round),
+          pinch: s.pinch === null ? null : {
+            c: s.pinch.centroid.map(Math.round),
+            pan: s.pinch.panPixels.map(Math.round),
+            z: Number(s.pinch.zoomFactor.toFixed(3)),
+          },
+        });
+        // Record transitions and any frame with one-shot/delta content.
+        if (line !== prev || s.leftPressed || s.pinch !== null) {
+          log.push({ frame: JSON.parse(line) });
+          prev = line;
+        }
+        document.getElementById('out').textContent = line;
+        requestAnimationFrame(frame);
+      };
+      requestAnimationFrame(frame);
+      window.__ready = true;
+    </script>
+  </body>
+</html>

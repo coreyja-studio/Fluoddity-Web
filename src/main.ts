@@ -306,6 +306,40 @@ async function start(): Promise<void> {
   // It is handled at construction, by withholding `runCalibration` entirely.
   if (firstVisit) void panel?.calibrate();
 
+  // `?inputdebug`: a raw pointer-event tape, for triaging touch on a device
+  // where DevTools is out of reach -- a phone in a hand. The last few events
+  // as the browser delivered them (capture phase, so nothing can eat one
+  // first), plus the tracker's per-frame verdict underneath. Nothing in the
+  // app reads it; it exists so "drag does nothing on my phone" comes back as
+  // "pointercancel right after the second move" instead of a shrug.
+  let renderInputTape: ((verdict: string) => void) | null = null;
+  if (params.has('inputdebug')) {
+    const inputTape = document.createElement('pre');
+    inputTape.style.cssText =
+      'position:fixed;left:0;bottom:0;margin:0;padding:6px 8px;z-index:50;' +
+      'font:11px/1.4 ui-monospace,monospace;color:#ff0;background:rgba(0,0,0,.7);' +
+      'pointer-events:none;white-space:pre;';
+    document.body.append(inputTape);
+    const lines: string[] = [];
+    for (const type of ['pointerdown', 'pointermove', 'pointerup', 'pointercancel'] as const) {
+      window.addEventListener(
+        type,
+        (ev: PointerEvent) => {
+          const line = `${type} ${ev.pointerType} #${ev.pointerId} ${Math.round(ev.clientX)},${Math.round(ev.clientY)}`;
+          // Collapse runs of moves so a drag does not scroll everything away.
+          if (type === 'pointermove' && lines[0]?.startsWith('pointermove')) lines[0] = line;
+          else lines.unshift(line);
+          lines.length = Math.min(lines.length, 6);
+        },
+        true,
+      );
+    }
+    renderInputTape = (verdict: string): void => {
+      inputTape.textContent = `${verdict}\n${lines.join('\n')}`;
+    };
+    renderInputTape('');
+  }
+
   const overlay = createDebugOverlay();
   let lastTime = performance.now();
   let firstFrame = true;
@@ -349,6 +383,14 @@ async function start(): Promise<void> {
     // AFTER the frame, so the panel shows what the simulation actually holds --
     // including changes the panel did not cause (undo, a preset load).
     panel?.refresh(orchestrator.status(), frameInput);
+
+    if (renderInputTape !== null) {
+      const p = frameInput.pinch;
+      renderInputTape(
+        `drag=${frameInput.leftDragging} press=${frameInput.leftPressed} ` +
+          `pinch=${p === null ? '-' : `pan ${p.panPixels.map(Math.round)} z ${p.zoomFactor.toFixed(2)}`}`,
+      );
+    }
 
     if (overlay !== null) {
       const d = orchestrator.diagnostics;
