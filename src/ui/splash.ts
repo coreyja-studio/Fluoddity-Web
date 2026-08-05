@@ -1,7 +1,8 @@
 /**
  * The welcome splash: what Fluoddity is, and how to drive it.
  *
- * Shown once at startup, dismissed by a click anywhere. It is deliberately the
+ * Shown once at startup, dismissed by a click on the backdrop (or any key) --
+ * the card itself is reading material, not a button. It is deliberately the
  * simplest thing in `ui/`: no command bus, no status, no refresh. It has one
  * piece of state (shown / not shown) and one transition, so it takes none of
  * the machinery the panel needs.
@@ -120,7 +121,7 @@ const SUBHEADINGS: ReadonlySet<string> = new Set([
  * that says "click anywhere to close" and then ignores the click reads as
  * broken, which is a worse first impression than the wait it is covering.
  */
-const HINT_FREE = 'Click anywhere to close';
+const HINT_FREE = 'Click outside the card (or press any key) to close';
 const HINT_LOCKED = 'One moment — measuring what your hardware can handle…';
 
 export interface SplashOptions {
@@ -207,8 +208,14 @@ export class Splash {
 
     this.root.append(this.card, this.status, this.hint);
 
-    // On `root`, so a click on the backdrop dismisses too -- the whole overlay
-    // is the target, including the card.
+    // On `root`, but THE CARD DOES NOT DISMISS -- only the backdrop around it.
+    // The card is a document someone is reading: a click there is a scroll-
+    // grab, a text selection, or a missed tap on the way to either, and every
+    // one of those yanking the splash away punishes exactly the person who
+    // wanted it most. The backdrop is the whole rest of the screen, and the
+    // cursor already draws the distinction (`pointer` out there, `auto` on the
+    // card). The containment test also covers the card's own scrollbar, which
+    // an earlier version had to carve out by geometry.
     //
     // **`pointerdown`, not `click`.** The app itself binds `pointerdown`
     // (`inputBinding.ts:215`), and matching it matters for more than symmetry:
@@ -217,7 +224,7 @@ export class Splash {
     // sits above the canvas, so this press is consumed here and the simulation
     // never sees it either way.
     this.root.addEventListener('pointerdown', (ev) => {
-      if (this.onScrollbar(ev)) return;
+      if (ev.target instanceof Node && this.card.contains(ev.target)) return;
       this.dismiss();
     });
     // A splash that eats the first keystroke would be worse than one that
@@ -230,47 +237,6 @@ export class Splash {
     };
 
     if (opts.showNow !== false) this.show();
-  }
-
-  /**
-   * Whether this press landed on the card's scrollbar rather than its content.
-   *
-   * The scrollbar is drawn INSIDE the card's border box, so it is not a
-   * separate element and `ev.target` is the card either way -- there is nothing
-   * to test but the geometry. `clientWidth` excludes the scrollbar while
-   * `getBoundingClientRect().width` includes it, so the difference is the
-   * gutter's width.
-   *
-   * Without this, grabbing the scrollbar to read further dismisses the splash
-   * on the way to the thumb -- the one gesture a long scrolling document most
-   * invites.
-   *
-   * **The gutter is a BOUNDED STRIP, not a half-plane.** Testing only
-   * `clientX >= contentEdge` also swallows every press out on the backdrop to
-   * the right of the card, since those are further right still -- so the whole
-   * right-hand side of the screen silently stopped dismissing. All four edges
-   * are checked, and the vertical span matters as much as the horizontal one:
-   * the backdrop directly above and below the card is inside the gutter's
-   * column.
-   *
-   * Only the vertical bar is checked: `overflow-y:auto` with no `overflow-x`
-   * means a horizontal bar never appears.
-   */
-  private onScrollbar(ev: PointerEvent): boolean {
-    const rect = this.card.getBoundingClientRect();
-    const gutter = rect.width - this.card.clientWidth;
-    if (gutter <= 0) return false; // No scrollbar, or an overlay one that takes no space.
-
-    // `clientLeft` is the left border width, which `clientWidth` also excludes;
-    // without it the strip would be offset by the border and a press on the
-    // card's right border would read as content.
-    const gutterLeft = rect.left + this.card.clientLeft + this.card.clientWidth;
-    return (
-      ev.clientX >= gutterLeft &&
-      ev.clientX < rect.right &&
-      ev.clientY >= rect.top &&
-      ev.clientY < rect.bottom
-    );
   }
 
   /** Show it, or do nothing if it is already up. Scrolled back to the top. */
