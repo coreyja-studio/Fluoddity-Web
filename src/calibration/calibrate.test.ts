@@ -19,10 +19,15 @@ import { PROGRESSION, budgetMs, cost, type Rung } from './progression.ts';
  *
  * `msPerCost` is the machine being simulated: multiply it by a rung's cost to
  * get that rung's frame time. Higher is slower.
+ *
+ * `quantum` simulates Safari: the completion for a batch resolves on the next
+ * multiple of it, however little work the batch actually did. This is the
+ * behaviour that motivated batched probes -- see `PROBE_BATCH` -- and the
+ * regression tests below run the ladder against it directly.
  */
 function fakeTarget(
   msPerCost: number,
-  opts: { throwAt?: number } = {},
+  opts: { throwAt?: number; quantum?: number } = {},
 ): CalibrationTarget & {
   committed: Rung | null;
   clock: () => number;
@@ -41,14 +46,16 @@ function fakeTarget(
       current = { worldSize, physicsSteps };
       return Promise.resolve(rebuilt);
     },
-    probeFrame: (): Promise<void> => {
-      state.probes++;
+    probeFrames: (count: number): Promise<void> => {
+      state.probes += count;
       if (opts.throwAt !== undefined && state.probes >= opts.throwAt) {
         return Promise.reject(new Error('device lost'));
       }
       // The clock only advances inside a probe, so the elapsed time the ladder
-      // measures is exactly this rung's simulated frame time.
-      t += cost(current) * msPerCost;
+      // measures is exactly this batch's simulated GPU time -- rounded up to
+      // the vsync quantum when one is being simulated, as Safari rounds it.
+      const raw = count * cost(current) * msPerCost;
+      t += opts.quantum === undefined ? raw : Math.ceil(raw / opts.quantum) * opts.quantum;
       return Promise.resolve();
     },
     commitCalibration: (worldSize: number, physicsSteps: number): Promise<void> => {
@@ -104,9 +111,10 @@ test('a thrown probe commits whatever had already passed', () => {
   // A device lost mid-walk must not lose the rungs already measured, and must
   // not propagate -- calibration runs on the startup path.
   const msPerCost = budgetMs() / 20 / 2; // Fast: nothing would fail on its own.
-  // Rung 1 costs 35 probes (25 burn-in + 10 timed) and rung 2 costs 12, so
-  // throwing on the 48th lands in rung 3, after rungs 1 and 2 have passed.
-  const target = fakeTarget(msPerCost, { throwAt: 48 });
+  // Rung 1 costs 43 frames (25 burn-in + 18 timed) and rung 2 costs 20, so
+  // throwing at frame 70 lands in rung 3's burn-in, after rungs 1 and 2 have
+  // passed.
+  const target = fakeTarget(msPerCost, { throwAt: 70 });
   return calibrate(target, { now: target.clock }).then((rung) => {
     assert.deepEqual({ ...rung }, { worldSize: 0.25, physicsSteps: 10 });
     assert.deepEqual(target.committed, { worldSize: 0.25, physicsSteps: 10 });
@@ -125,10 +133,10 @@ test('cancelling commits what passed and stops probing', () => {
   }).then((rung) => {
     assert.deepEqual({ ...rung }, { worldSize: 0.25, physicsSteps: 10 });
     assert.deepEqual(target.committed, { worldSize: 0.25, physicsSteps: 10 });
-    // Rung 1 moves the world (25 burn-in + 10 timed); rung 2 moves only the
-    // physics rate on the same warm system (2 warm-up + 10 timed). Nothing was
+    // Rung 1 moves the world (25 burn-in + 18 timed); rung 2 moves only the
+    // physics rate on the same warm system (2 warm-up + 18 timed). Nothing was
     // probed after the cancel.
-    assert.equal(target.probes, 35 + 12);
+    assert.equal(target.probes, 43 + 20);
   });
 });
 
@@ -139,14 +147,14 @@ test('the wall-clock ceiling ends a walk that is passing but slow', () => {
   const target = fakeTarget(budgetMs() / 20 / 2);
   let now = 0;
   return calibrate(target, {
-    // Two rungs' worth of probes is 47; past that the clock reads beyond the
+    // Two rungs' worth of frames is 63; past that the clock reads beyond the
     // ceiling, so the walk ends before rung 3 despite every rung fitting.
-    now: () => (target.probes >= 47 ? 99_999 : now++),
+    now: () => (target.probes >= 63 ? 99_999 : now++),
   }).then((rung) => {
     assert.deepEqual({ ...rung }, { worldSize: 0.25, physicsSteps: 10 });
     assert.deepEqual(target.committed, { worldSize: 0.25, physicsSteps: 10 });
     // The ceiling, not the budget: every rung probed was comfortably fast.
-    assert.equal(target.probes, 47);
+    assert.equal(target.probes, 63);
   });
 });
 
@@ -175,7 +183,7 @@ test('the walk does not resolve until the commit has settled', async () => {
   let settled = false;
   const target: CalibrationTarget = {
     calibrateTo: () => Promise.resolve(false),
-    probeFrame: () => Promise.resolve(),
+    probeFrames: () => Promise.resolve(),
     commitCalibration: async () => {
       await Promise.resolve();
       settled = true;
@@ -191,11 +199,42 @@ test('a commit that throws is contained', () => {
   // `finally` as an unhandled path or leave the splash locked.
   const target: CalibrationTarget = {
     calibrateTo: () => Promise.resolve(false),
-    probeFrame: () => Promise.resolve(),
+    probeFrames: () => Promise.resolve(),
     commitCalibration: () => Promise.reject(new Error('rebuild failed')),
   };
   return calibrate(target, { now: () => 0 }).then((rung) => {
     assert.ok(rung !== undefined, 'calibrate rejected instead of returning');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Safari: completion times quantized to vsync
+// ---------------------------------------------------------------------------
+//
+// The regression that forced batched probes. Safari resolves
+// `onSubmittedWorkDone` on the next vsync, so the old one-frame-per-sample
+// ladder measured ~16.7 ms on EVERY sample on EVERY iOS device -- over the
+// 11.7 ms budget always, so every rung "failed" and every iPhone and iPad
+// committed the unprobed floor. These run the whole ladder against a
+// quantizing clock; the first is the test that fails on the old design.
+
+test('a fast machine reaches the top rung despite vsync-quantized timing', () => {
+  const msPerCost = budgetMs() / 20 / 2; // Comfortably fast at every rung.
+  const target = fakeTarget(msPerCost, { quantum: 16.7 });
+  return calibrate(target, { now: target.clock }).then((rung) => {
+    assert.deepEqual({ ...rung }, { ...PROGRESSION.at(-1)! });
+    assert.deepEqual(target.committed, { ...PROGRESSION.at(-1)! });
+  });
+});
+
+test('quantization does not rescue a machine that is genuinely slow', () => {
+  // Real per-frame cost far over budget: rounding it UP to a quantum must not
+  // change the verdict, and rounding can only lengthen a batch, never shorten
+  // it -- pinned so a later "fix" cannot make quantization flattering.
+  const msPerCost = (budgetMs() / 0.25) * 2;
+  const target = fakeTarget(msPerCost, { quantum: 16.7 });
+  return calibrate(target, { now: target.clock }).then((rung) => {
+    assert.deepEqual({ ...rung }, { ...PROGRESSION[0]! });
   });
 });
 
@@ -212,8 +251,8 @@ test('warm-up frames are not timed', () => {
       probes = 0; // Each rung gets its own expensive first frames.
       return Promise.resolve(false);
     },
-    probeFrame: () => {
-      t += probes++ < 2 ? 10_000 : 0.01;
+    probeFrames: (count: number) => {
+      for (let i = 0; i < count; i++) t += probes++ < 2 ? 10_000 : 0.01;
       return Promise.resolve();
     },
     commitCalibration: (worldSize, physicsSteps) => {
@@ -248,8 +287,8 @@ test('a rebuilt rung burns far more frames than a physics-only one', () => {
       world = worldSize;
       return Promise.resolve(rebuilt);
     },
-    probeFrame: () => {
-      probes++;
+    probeFrames: (count: number) => {
+      probes += count;
       return Promise.resolve();
     },
     commitCalibration: () => {
@@ -258,8 +297,8 @@ test('a rebuilt rung burns far more frames than a physics-only one', () => {
     },
   };
   return calibrate(target, { now: () => 0 }).then(() => {
-    // The progression alternates world / physics all the way down, so the probe
-    // counts alternate too: 35 (25 burn-in + 10 timed) then 12 (2 warm-up + 10).
-    assert.deepEqual(perRung, [35, 12, 35, 12, 35, 12]);
+    // The progression alternates world / physics all the way down, so the frame
+    // counts alternate too: 43 (25 burn-in + 18 timed) then 20 (2 warm-up + 18).
+    assert.deepEqual(perRung, [43, 20, 43, 20, 43, 20]);
   });
 });

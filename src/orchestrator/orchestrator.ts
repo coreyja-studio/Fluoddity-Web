@@ -1768,13 +1768,22 @@ export class Orchestrator implements CommandBus {
    * two knobs actually scale, and it is why `HEADROOM` exists to account for
    * everything left out.
    */
-  async probeFrame(): Promise<void> {
+  async probeFrames(count: number): Promise<void> {
     this.system.physicsSteps = Math.max(1, Math.trunc(this.prefs.physicsSteps));
-    const encoder = this.device.createCommandEncoder({ label: 'calibration probe' });
-    // No shove: `shoveState` needs an InputState, and a probe has no user input
-    // to translate. `null` is the same thing a frame with no drag on it passes.
-    this.system.runFrame(encoder, null);
-    this.device.queue.submit([encoder.finish()]);
+    // Every frame is submitted BEFORE the one completion wait, and that shape
+    // is the contract, not an optimization: Safari resolves
+    // `onSubmittedWorkDone` on the next vsync, so a loop that awaited each
+    // frame would read ~16.7 ms per frame on any hardware whatsoever -- which
+    // is exactly the bug that sent every iOS device to the calibration floor.
+    // One await amortizes the quantum across the batch. See `PROBE_BATCH` in
+    // `calibration/calibrate.ts` for the whole story.
+    for (let i = 0; i < count; i++) {
+      const encoder = this.device.createCommandEncoder({ label: 'calibration probe' });
+      // No shove: `shoveState` needs an InputState, and a probe has no user
+      // input to translate. `null` is what a frame with no drag on it passes.
+      this.system.runFrame(encoder, null);
+      this.device.queue.submit([encoder.finish()]);
+    }
     await this.device.queue.onSubmittedWorkDone();
   }
 
@@ -1788,7 +1797,7 @@ export class Orchestrator implements CommandBus {
    * re-derive on the next load, nor with the flag set and the settings not.
    *
    * **THE RESET IS WHAT THE USER ACTUALLY SEES.** Probing advances the
-   * simulation -- five frames per rung, at up to 20 sub-steps each, across
+   * simulation -- dozens of frames per rung, at up to 20 sub-steps each, across
    * however many rungs the machine reached. Without this, the first picture
    * someone gets is a few hundred sub-steps of evolution that happened behind a
    * splash they were still reading, at world sizes that no longer apply, on a

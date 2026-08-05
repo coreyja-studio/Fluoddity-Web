@@ -40,7 +40,15 @@ import { PROGRESSION, budgetMs, type Rung } from './progression.ts';
 export interface CalibrationTarget {
   /** Applies a rung. Resolves to whether the simulation was rebuilt. */
   calibrateTo(worldSize: number, physicsSteps: number): Promise<boolean>;
-  probeFrame(): Promise<void>;
+  /**
+   * Submit `count` frames and resolve when the GPU has finished ALL of them.
+   *
+   * A batch, not a loop of single frames, and the batching is load-bearing --
+   * see PROBE_BATCH for the Safari failure that forced it. One completion
+   * await per batch is the entire point; an implementation that awaited each
+   * frame internally would faithfully reintroduce the bug.
+   */
+  probeFrames(count: number): Promise<void>;
   /** Persists the result, rebuilds if needed, and restarts the simulation. */
   commitCalibration(worldSize: number, physicsSteps: number): Promise<void>;
 }
@@ -64,19 +72,45 @@ export interface CalibrationOptions {
 }
 
 /**
- * Probes per rung, reduced by a median.
+ * Timed samples per rung, reduced by a median. Each sample is a BATCH of
+ * `PROBE_BATCH` frames, so a rung is measured across 18 frames in three
+ * completion waits.
  *
- * Ten, because the whole walk finishes in well under a second of GPU time and
- * accuracy is the only thing worth spending that on. A single scheduling hiccup
- * -- a GC pause, another tab waking up, a background process taking the GPU --
- * must not be able to fail a rung the machine can comfortably hold, and a
- * ten-sample median is thoroughly insensitive to one or two bad frames where a
- * three-sample one was not.
- *
- * With an even count the median takes the upper of the two middle values (see
- * `median`), which leans very slightly toward caution.
+ * Three, down from ten single-frame samples, because the batching does most of
+ * the outlier work the sample count used to do: a GC pause or a waking tab
+ * lands inside one batch and is diluted across its six frames, and the median
+ * then discards that batch entirely if it is still the odd one out.
  */
-const SAMPLES = 10;
+const SAMPLES = 3;
+
+/**
+ * Frames per timed sample -- and THE FIX FOR A REAL FAILURE, not a tuning
+ * knob.
+ *
+ * The ladder originally timed one frame per sample: submit, await
+ * `onSubmittedWorkDone`, subtract. **Safari resolves that completion on the
+ * next VSYNC**, so every sample on every iOS device read as ~16.7 ms
+ * regardless of how fast the GPU actually finished -- over an 11.7 ms budget,
+ * always, on hardware of any speed. Every rung "failed", every iPhone and
+ * iPad committed the unprobed floor (world 0.05, physics 1), and because tool
+ * strength deliberately scales with the physics rate, the whole app ran at
+ * 1/30th speed and the drag tools read as dead. Chromium resolves completions
+ * promptly, which is why desktop testing never saw any of this.
+ *
+ * Submitting six frames and awaiting ONE completion amortizes the quantum:
+ * the vsync rounding lands once on the batch instead of once per frame, so a
+ * fast GPU measures ~16.7/6 = 2.8 ms per frame and passes honestly. A slow
+ * GPU's real work dominates the quantum and still fails honestly. Near the
+ * budget boundary the rounding can only overestimate -- at most one rung of
+ * caution, in the direction that was already policy (see HEADROOM).
+ *
+ * Six is deliberately modest: a batch must stay well inside the walk's
+ * wall-clock ceiling even at the most expensive rung on a slow machine
+ * (rung cost 20 x 6 frames at a miss-worthy 30 ms is ~0.6 s), while being
+ * long enough that a 16.7 ms quantum cannot push a comfortable rung over
+ * budget (16.7/6 < 11.7 with room to spare).
+ */
+const PROBE_BATCH = 6;
 
 /**
  * Discarded frames after a change that did NOT rebuild.
@@ -154,14 +188,17 @@ export async function calibrate(
       // A physics-only rung inherits the warm simulation the previous rung left
       // running and needs no such settling.
       const rebuilt = await target.calibrateTo(rung.worldSize, rung.physicsSteps);
+      // One batch, one completion wait: on Safari, N awaited single frames
+      // cost N vsyncs of pure waiting before anything is even measured.
       const warmup = rebuilt ? REBUILD_WARMUP : WARMUP;
-      for (let w = 0; w < warmup; w++) await target.probeFrame();
+      await target.probeFrames(warmup);
 
       const samples: number[] = [];
       for (let s = 0; s < SAMPLES; s++) {
         const t0 = now();
-        await target.probeFrame();
-        samples.push(now() - t0);
+        await target.probeFrames(PROBE_BATCH);
+        // The PER-FRAME estimate, so the budget comparison below is unchanged.
+        samples.push((now() - t0) / PROBE_BATCH);
       }
 
       if (median(samples) > budgetMs()) break;
