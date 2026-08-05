@@ -255,3 +255,172 @@ test('mousePos and dt come through as given', () => {
   assert.deepEqual(state.mousePos, [12.5, 640]);
   assert.equal(state.dt, 0.25);
 });
+
+// ---------------------------------------------------------------------------
+// Touch: one finger is the left button, two are the camera
+// ---------------------------------------------------------------------------
+//
+// The properties pinned here are the touch analogues of the three asymmetries,
+// plus the two that are new with fingers: the TAP SLOP (a press must not fire
+// until the release proves it was a tap) and the CAMERA LATCH (a sequence that
+// ever held two fingers belongs to the camera until every finger lifts). All
+// of them fail quietly -- a select firing at the start of every pinch is the
+// showcase, because the pick is async and the damage (an adopted rule) lands
+// frames later, nowhere near the gesture that caused it.
+
+test('a clean tap fires leftPressed on the release, not the press', () => {
+  const tracker = new InputTracker();
+  tracker.onTouchDown(1, 100, 100, false);
+
+  // While the finger is down, nothing has happened yet: within the slop it is
+  // not a drag, and until the release it is not a tap.
+  let state = tracker.freeze(TICK);
+  assert.equal(state.leftPressed, false, 'a tap must wait for its release');
+  assert.equal(state.leftDragging, false);
+
+  tracker.onTouchUp(1);
+  state = tracker.freeze(TICK);
+  assert.equal(state.leftPressed, true);
+  assert.deepEqual(state.mousePos, [100, 100], 'the tap picks where the finger landed');
+
+  // One-shot: drained like a mouse press.
+  assert.equal(tracker.freeze(TICK).leftPressed, false);
+});
+
+test('a tap survives sub-slop roll; a real drag does not fire one', () => {
+  const tracker = new InputTracker();
+  tracker.onTouchDown(1, 100, 100, false);
+  tracker.onTouchMove(1, 104, 103); // fingers roll -- still a tap
+  tracker.onTouchUp(1);
+  assert.equal(tracker.freeze(TICK).leftPressed, true, 'rolling a few pixels is still a tap');
+
+  tracker.onTouchDown(1, 100, 100, false);
+  tracker.onTouchMove(1, 160, 100); // well past the slop
+  const dragging = tracker.freeze(TICK);
+  assert.equal(dragging.leftDragging, true, 'past the slop the finger is the held button');
+  assert.deepEqual(dragging.mousePos, [160, 100], 'the cursor follows the finger');
+
+  tracker.onTouchUp(1);
+  const released = tracker.freeze(TICK);
+  assert.equal(released.leftDragging, false);
+  assert.equal(released.leftPressed, false, 'a drag is not also a tap');
+});
+
+test('a finger landing on the UI is dropped entirely, moves and all', () => {
+  const tracker = new InputTracker();
+  tracker.onTouchDown(1, 100, 100, true);
+  tracker.onTouchMove(1, 300, 300);
+  tracker.onTouchUp(1);
+
+  const state = tracker.freeze(TICK);
+  assert.equal(state.leftPressed, false);
+  assert.equal(state.leftDragging, false);
+  assert.equal(state.pinch, null);
+  assert.deepEqual(state.mousePos, [0, 0], 'a captured finger must not move the cursor');
+});
+
+test('a second finger ends the tool drag and latches the camera', () => {
+  const tracker = new InputTracker();
+  tracker.onTouchDown(1, 100, 100, false);
+  tracker.onTouchMove(1, 200, 100); // a real drag is in progress
+  assert.equal(tracker.freeze(TICK).leftDragging, true);
+
+  tracker.onTouchDown(2, 300, 100, false);
+  const state = tracker.freeze(TICK);
+  assert.equal(state.leftDragging, false, 'the second finger releases the tool');
+  assert.notEqual(state.pinch, null, 'two fingers are the camera');
+
+  // The latch holds through the release order: lifting back down to ONE finger
+  // keeps the survivor on the camera, and lifting the last must not fire a tap
+  // -- the user was navigating, not selecting.
+  tracker.onTouchUp(1);
+  assert.notEqual(tracker.freeze(TICK).pinch, null, 'the survivor keeps the camera');
+  tracker.onTouchUp(2);
+  const done = tracker.freeze(TICK);
+  assert.equal(done.pinch, null);
+  assert.equal(done.leftPressed, false, 'ending a camera gesture is not a tap');
+});
+
+test('pinch reports centroid movement as pan and spread ratio as zoom', () => {
+  const tracker = new InputTracker();
+  tracker.onTouchDown(1, 100, 200, false);
+  tracker.onTouchDown(2, 300, 200, false); // centroid (200,200), spread 100
+  tracker.freeze(TICK); // settle the down frame
+
+  // Both fingers translate +40x: pure pan, no zoom.
+  tracker.onTouchMove(1, 140, 200);
+  tracker.onTouchMove(2, 340, 200);
+  let state = tracker.freeze(TICK);
+  assert.notEqual(state.pinch, null);
+  // Each move shifts the centroid by half the finger's travel: 20 + 20.
+  assert.deepEqual(state.pinch?.panPixels, [40, 0]);
+  assertNear(state.pinch?.zoomFactor ?? NaN, 1.0, 'translation must not zoom');
+
+  // Fingers part to double the spread: pure zoom, factor 2.
+  tracker.onTouchMove(1, 40, 200);
+  tracker.onTouchMove(2, 440, 200);
+  state = tracker.freeze(TICK);
+  assertNear(state.pinch?.zoomFactor ?? NaN, 2.0, 'doubling the spread doubles the zoom');
+  assert.deepEqual(state.pinch?.panPixels, [0, 0], 'a symmetric pinch must not pan');
+});
+
+test('the deltas drain each frame; the gesture itself persists', () => {
+  const tracker = new InputTracker();
+  tracker.onTouchDown(1, 100, 200, false);
+  tracker.onTouchDown(2, 300, 200, false);
+  tracker.onTouchMove(1, 120, 200);
+  tracker.freeze(TICK);
+
+  // No movement since: the pinch is still live, its deltas are spent.
+  const quiet = tracker.freeze(TICK);
+  assert.notEqual(quiet.pinch, null, 'fingers on the glass are a condition, not an event');
+  assert.deepEqual(quiet.pinch?.panPixels, [0, 0]);
+  assertNear(quiet.pinch?.zoomFactor ?? NaN, 1.0);
+});
+
+test('a finger lifting mid-pinch does not fling the view', () => {
+  const tracker = new InputTracker();
+  tracker.onTouchDown(1, 0, 0, false);
+  tracker.onTouchDown(2, 400, 0, false); // centroid (200, 0)
+  tracker.freeze(TICK);
+
+  // Finger 2 leaves. The centroid teleports to (0,0) -- which must NOT read
+  // as 200 pixels of pan, because no finger moved.
+  tracker.onTouchUp(2);
+  const state = tracker.freeze(TICK);
+  assert.deepEqual(state.pinch?.panPixels, [0, 0], 'a count change is not movement');
+
+  // The survivor panning from its own position works from the new baseline.
+  tracker.onTouchMove(1, 30, 10);
+  assert.deepEqual(tracker.freeze(TICK).pinch?.panPixels, [30, 10]);
+});
+
+test('a cancelled finger is not a tap', () => {
+  const tracker = new InputTracker();
+  tracker.onTouchDown(1, 100, 100, false);
+  tracker.onTouchCancel(1); // the platform reclaimed it -- alert, edge gesture
+
+  const state = tracker.freeze(TICK);
+  assert.equal(state.leftPressed, false, 'the user did not choose this release');
+  assert.equal(state.leftDragging, false);
+});
+
+test('focus loss forgets the fingers, not just the buttons', () => {
+  const tracker = new InputTracker();
+  tracker.onTouchDown(1, 100, 100, false);
+  tracker.onFocusLost();
+
+  // The up for that finger never arrives. The NEXT touch must be a first
+  // finger -- a ghost entry would make it a "second" and latch the camera.
+  tracker.onTouchDown(2, 50, 50, false);
+  tracker.onTouchUp(2);
+  assert.equal(tracker.freeze(TICK).leftPressed, true, 'a fresh tap after focus loss still taps');
+});
+
+/** Float comparison for spread ratios, which divide and so are never exact. */
+function assertNear(actual: number, expected: number, message?: string): void {
+  assert.ok(
+    Math.abs(actual - expected) < 1e-9,
+    message ?? `expected ${actual} to be within 1e-9 of ${expected}`,
+  );
+}

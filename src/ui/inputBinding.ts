@@ -33,7 +33,7 @@
  */
 
 import { DEFAULT_HOTKEYS, isEditableTarget, matchHotkey, type Hotkey } from './hotkeys.ts';
-import { InputTracker } from './inputTracker.ts';
+import { InputTracker, LEFT_BUTTON, RIGHT_BUTTON } from './inputTracker.ts';
 import type { Surface } from '../app/surface.ts';
 import type { Command } from '../orchestrator/commands.ts';
 
@@ -113,12 +113,18 @@ export function bindInput(opts: InputBindingOptions): {
   };
 
   // --- pointer -------------------------------------------------------------
+  //
+  // TWO ROUTES, SPLIT ON `pointerType`. Fingers go to the tracker's touch
+  // methods, which speak pointer IDS -- a finger has no button, and two of
+  // them arriving as `button 0` would each stomp the other's press. Everything
+  // else -- mouse, and DELIBERATELY pen -- takes the button route: a stylus is
+  // a cursor with perfect aim, so an Apple Pencil taps, drags and draws
+  // exactly as the mouse does rather than through the tap-slop machinery a
+  // blunt fingertip needs.
+
+  const isTouch = (event: PointerEvent): boolean => event.pointerType === 'touch';
 
   const onPointerDown = (event: PointerEvent): void => {
-    // Position first: a click that arrives before any movement (a tap, or the
-    // very first interaction after load) must still pick at the right place.
-    tracker.onPointerMove(...toFramebuffer(event));
-
     const captured = capturedByUi(event);
     if (!captured) {
       // The drag keeps receiving move/up events even when the cursor leaves the
@@ -127,16 +133,32 @@ export function bindInput(opts: InputBindingOptions): {
       // browser cooperate rather than relying on the window listeners alone.
       canvas.setPointerCapture(event.pointerId);
     }
+    if (isTouch(event)) {
+      tracker.onTouchDown(event.pointerId, ...toFramebuffer(event), captured);
+      return;
+    }
+    // Position first: a click that arrives before any movement (a tap, or the
+    // very first interaction after load) must still pick at the right place.
+    tracker.onPointerMove(...toFramebuffer(event));
     tracker.onPointerDown(event.button, captured);
   };
 
   // On WINDOW, and never capture-filtered. See the header.
   const onPointerUp = (event: PointerEvent): void => {
+    if (isTouch(event)) {
+      tracker.onTouchMove(event.pointerId, ...toFramebuffer(event));
+      tracker.onTouchUp(event.pointerId);
+      return;
+    }
     tracker.onPointerMove(...toFramebuffer(event));
     tracker.onPointerUp(event.button);
   };
 
   const onPointerMove = (event: PointerEvent): void => {
+    if (isTouch(event)) {
+      tracker.onTouchMove(event.pointerId, ...toFramebuffer(event));
+      return;
+    }
     tracker.onPointerMove(...toFramebuffer(event));
   };
 
@@ -144,11 +166,24 @@ export function bindInput(opts: InputBindingOptions): {
    * `pointercancel` is a release the desktop has no equivalent for.
    *
    * The browser fires it instead of `pointerup` when it takes the pointer away
-   * -- a touch becoming a scroll gesture, or the window losing the device. It
-   * is still a drag that must end, so it routes to the same place.
+   * -- a touch it reclaimed for its own gesture, or the window losing the
+   * device. It is still a drag that must end.
+   *
+   * FOR THE MOUSE, BOTH BUTTONS ARE RELEASED, NOT `event.button`. A cancel is
+   * not a button transition, so the spec puts `-1` in `button` -- which matches
+   * neither button and would clear nothing, leaving the canvas dragging at the
+   * last cursor position until something else happened to end it. There is no
+   * per-button cancel to be had, and over-releasing is the harmless direction:
+   * asymmetry 2 already says a release is always honoured.
    */
   const onPointerCancel = (event: PointerEvent): void => {
-    tracker.onPointerUp(event.button);
+    if (isTouch(event)) {
+      // Not `onTouchUp`: a lift the PLATFORM chose must not fire the tap.
+      tracker.onTouchCancel(event.pointerId);
+      return;
+    }
+    tracker.onPointerUp(LEFT_BUTTON);
+    tracker.onPointerUp(RIGHT_BUTTON);
   };
 
   const onWheel = (event: WheelEvent): void => {
@@ -240,9 +275,26 @@ export function bindInput(opts: InputBindingOptions): {
     tracker.onFocusLost();
   };
 
+  /**
+   * Safari's proprietary pinch events (`gesturestart`/`change`/`end`).
+   *
+   * `touch-action: none` (index.html) is what actually keeps the browser's
+   * hands off the canvas, and Safari 13+ honours it for these too -- but the
+   * property has to survive every future stylesheet edit for that to stay
+   * true, and the failure is the page itself zooming underneath a pinch. A
+   * `preventDefault` here is the belt to that suspender: three listeners no
+   * other browser will ever fire.
+   */
+  const onGesture = (event: Event): void => {
+    event.preventDefault();
+  };
+
   canvas.addEventListener('pointerdown', onPointerDown);
   canvas.addEventListener('wheel', onWheel, { passive: false });
   canvas.addEventListener('contextmenu', onContextMenu);
+  canvas.addEventListener('gesturestart', onGesture);
+  canvas.addEventListener('gesturechange', onGesture);
+  canvas.addEventListener('gestureend', onGesture);
   window.addEventListener('pointerup', onPointerUp);
   window.addEventListener('pointercancel', onPointerCancel);
   window.addEventListener('pointermove', onPointerMove);
@@ -256,6 +308,9 @@ export function bindInput(opts: InputBindingOptions): {
       canvas.removeEventListener('pointerdown', onPointerDown);
       canvas.removeEventListener('wheel', onWheel);
       canvas.removeEventListener('contextmenu', onContextMenu);
+      canvas.removeEventListener('gesturestart', onGesture);
+      canvas.removeEventListener('gesturechange', onGesture);
+      canvas.removeEventListener('gestureend', onGesture);
       window.removeEventListener('pointerup', onPointerUp);
       window.removeEventListener('pointercancel', onPointerCancel);
       window.removeEventListener('pointermove', onPointerMove);

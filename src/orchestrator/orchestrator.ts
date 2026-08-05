@@ -675,6 +675,24 @@ export class Orchestrator implements CommandBus {
     if (state.scroll !== 0) {
       this.camera.state.zoomAtPixel(state.scroll, state.mousePos, windowSize, canvasSize);
     }
+
+    // The two-finger gesture: navigation too, so it lives beside the wheel and
+    // outside the tool branches. Zoom before pan within the frame -- the pan
+    // delta was measured against the fingers, and converting it through the
+    // post-zoom transform keeps the content under them when a gesture does
+    // both at once. The tracker guarantees the tool fields are quiet while
+    // this is non-null (the camera latch), so there is no interleaving to
+    // worry about here.
+    if (state.pinch !== null) {
+      const { centroid, panPixels, zoomFactor } = state.pinch;
+      this.camera.state.zoomFactorAtPixel(
+        zoomFactor,
+        [centroid[0], centroid[1]],
+        windowSize,
+        canvasSize,
+      );
+      this.camera.state.panByPixels([panPixels[0], panPixels[1]], windowSize, canvasSize);
+    }
   }
 
   /**

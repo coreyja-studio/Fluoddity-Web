@@ -258,3 +258,83 @@ test('parity: panByFraction transitions match the Python', () => {
     assertClose(camera.zoom, c.end.zoom, `${label} [zoom]`, 1e-9);
   }
 });
+
+// ---------------------------------------------------------------------------
+// zoomFactorAtPixel and panByPixels: the touch camera
+// ---------------------------------------------------------------------------
+
+test('zoomFactorAtPixel keeps the world point under the anchor fixed', () => {
+  const pixels: Vec2[] = [[960, 540], [100, 900], [0, 0]];
+  for (const pixel of pixels) {
+    for (const factor of [2.0, 0.5, 1.3, 1 / 1.3]) {
+      const camera = new CameraState({ pan: [0.5, -0.3], zoom: 2.5 });
+      const before = screenToWorld(pixel, WINDOW, CANVAS, camera.pan, camera.zoom);
+      camera.zoomFactorAtPixel(factor, pixel, WINDOW, CANVAS);
+      const after = screenToWorld(pixel, WINDOW, CANVAS, camera.pan, camera.zoom);
+      assertCloseVec2(after, before, `anchor drifted: pixel=${pixel} factor=${factor}`, 1e-9);
+    }
+  }
+});
+
+// The wheel path delegates to the factor path, so the two must be one
+// arithmetic: n notches IS a factor of ZOOM_PER_NOTCH ** n.
+test('zoomAtPixel and zoomFactorAtPixel agree through the notch conversion', () => {
+  const pixel: Vec2 = [500, 300];
+  for (const notches of [1, -2, 0.5]) {
+    const byNotches = new CameraState({ pan: [0.1, 0.2], zoom: 1.5 });
+    const byFactor = new CameraState({ pan: [0.1, 0.2], zoom: 1.5 });
+    byNotches.zoomAtPixel(notches, pixel, WINDOW, CANVAS);
+    byFactor.zoomFactorAtPixel(ZOOM_PER_NOTCH ** notches, pixel, WINDOW, CANVAS);
+    assertClose(byNotches.zoom, byFactor.zoom, `zoom diverged at ${notches} notches`, 1e-12);
+    assertCloseVec2(byNotches.pan, byFactor.pan, `pan diverged at ${notches} notches`, 1e-12);
+  }
+});
+
+// A degenerate gesture -- two fingers on one point -- must not be able to
+// smuggle a zero or a NaN into the zoom. Same posture as setZoom.
+test('zoomFactorAtPixel rejects non-positive and non-finite factors', () => {
+  for (const factor of [0, -2, NaN, Infinity]) {
+    const camera = new CameraState({ pan: [0.3, -0.2], zoom: 2.0 });
+    camera.zoomFactorAtPixel(factor, [960, 540], WINDOW, CANVAS);
+    assert.equal(camera.zoom, 2.0, `factor ${factor} must be rejected`);
+    assert.deepEqual(camera.pan, [0.3, -0.2]);
+  }
+});
+
+// The defining property of "content follows the fingers": the world point that
+// was under a pixel is under pixel-plus-delta afterwards. Exercised at a zoom
+// and pan where a hand-rolled pixels-to-world scale would betray a missing
+// letterbox or y-flip factor -- WINDOW and CANVAS have different aspects, so
+// the letterbox is live in these numbers.
+test('panByPixels moves the world with the pointer', () => {
+  const deltas: Vec2[] = [[120, 0], [0, -80], [37, 53]];
+  for (const delta of deltas) {
+    for (const zoom of [1.0, 3.0, 0.4]) {
+      const camera = new CameraState({ pan: [0.25, -0.6], zoom });
+      const grabbed: Vec2 = [700, 400];
+      const before = screenToWorld(grabbed, WINDOW, CANVAS, camera.pan, camera.zoom);
+      camera.panByPixels(delta, WINDOW, CANVAS);
+      const after = screenToWorld(
+        [grabbed[0] + delta[0], grabbed[1] + delta[1]],
+        WINDOW,
+        CANVAS,
+        camera.pan,
+        camera.zoom,
+      );
+      assertCloseVec2(
+        after,
+        before,
+        `content slipped: delta=${delta} zoom=${zoom}`,
+        1e-9,
+      );
+    }
+  }
+});
+
+test('panByPixels ignores zero and non-finite deltas', () => {
+  const camera = new CameraState({ pan: [0.25, -0.6], zoom: 2.0 });
+  camera.panByPixels([0, 0], WINDOW, CANVAS);
+  camera.panByPixels([NaN, 10], WINDOW, CANVAS);
+  camera.panByPixels([10, Infinity], WINDOW, CANVAS);
+  assert.deepEqual(camera.pan, [0.25, -0.6]);
+});

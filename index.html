@@ -22,6 +22,19 @@
         display: block;
         width: 100%;
         height: 100%;
+
+        /* The canvas owns its touches. Without this the browser claims them
+           for its own scrolling and zooming -- a finger drag fires pointerdown
+           and then pointercancel, and the stroke it should have drawn becomes
+           a page scroll. This one property is what makes touch input POSSIBLE;
+           the listeners in src/ui/inputBinding.ts assume it. */
+        touch-action: none;
+
+        /* A long-press on iOS otherwise offers to select/share the canvas as
+           an image, mid-stroke. */
+        -webkit-user-select: none;
+        user-select: none;
+        -webkit-touch-callout: none;
       }
 
       #gpu-error {

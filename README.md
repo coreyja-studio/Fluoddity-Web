@@ -728,6 +728,43 @@ browser would zoom ~100× faster than the other. Accumulated within the frame
 (`+=`), because `zoomAtPixel` takes notches as an exponent and a fast flick
 should be worth proportionally more.
 
+### Touch: one finger is the left button, two are the camera
+
+Touch reaches the same frozen `InputState` through two doors, and nothing
+downstream knows fingers exist:
+
+- **One finger is the left button.** A tap selects; a drag past a small slop is
+  the held button, so Shove pushes and Draw paints. The slop is why touch taps
+  fire on the *release* where mouse clicks fire on the press: a finger lands,
+  rolls a few pixels and lifts, and — more to the point — the first finger of a
+  pinch goes down before the second. Firing on the down edge would dispatch a
+  pick at the start of every two-finger gesture.
+- **Two fingers are the camera**: pan follows the centroid, zoom follows the
+  spread, anchored at the centroid exactly as wheel zoom anchors at the cursor
+  (`zoomFactorAtPixel` is the factor form of the same arithmetic). The claim is
+  a **latch** — once a sequence has held two fingers it stays the camera's
+  until every finger lifts, including a lone survivor, which keeps panning.
+  Handing the survivor back to the tool would end every pinch with an
+  accidental stroke from whichever finger lifted second.
+- **A stylus is a mouse.** An Apple Pencil has perfect aim and no second
+  finger, so it takes the pointer path, not the slop machinery.
+
+There is deliberately no touch analogue of the right button yet (undo in
+Select, pull in Shove, erase in Draw). Every candidate — two-finger tap, long
+press — collides with either the camera latch or the tap slop, so the mapping
+deserves its own decision rather than three ad-hoc ones.
+
+The keyboard half of navigation (WASD, Q/E) has no touch equivalent and needs
+none: the two-finger gesture *is* pan and zoom.
+
+Two platform notes, both load-bearing: `#app` carries `touch-action: none`
+(index.html), without which the browser claims every drag for scrolling and
+delivers `pointercancel` instead of a stroke — this single property is what
+makes touch input possible at all. And `pointercancel` is routed as a release
+that **fires no tap**: the platform chose that lift, not the user, and a pick
+adopting a rule from a gesture the system reclaimed would be a selection
+nobody made.
+
 ### The hotkey table, and its deliberate divergence
 
 A **table** rather than `ui.py:422-491`'s straight-line `if` chain, because the

@@ -41,12 +41,39 @@
  *      the events and leaves the conditions (`ui.py:244-252`).
  */
 
-import type { InputState } from './inputState.ts';
+import type { InputState, PinchState } from './inputState.ts';
 
 /** Which pointer button. The values are `PointerEvent.button`. */
 export const LEFT_BUTTON = 0;
 export const MIDDLE_BUTTON = 1;
 export const RIGHT_BUTTON = 2;
+
+/**
+ * How far a lone finger may wander, in framebuffer pixels, and still be a TAP.
+ *
+ * A finger is not a cursor: even a deliberate tap lands, rolls a few pixels and
+ * lifts, so a press that fired `leftPressed` on the DOWN edge -- the mouse
+ * behaviour -- would dispatch a pick at the start of every pinch, before the
+ * second finger has landed. Touch therefore decides tap-vs-drag by this slop:
+ * inside it a release is a tap, beyond it the finger is a drag (the left
+ * button, held).
+ *
+ * Framebuffer pixels, because that is the unit everything downstream of the
+ * binding speaks. On a 2x display this is ~9 CSS pixels, close to the ~10 the
+ * browsers themselves use for click-vs-drag disambiguation; on a 1x touch
+ * screen it is a little generous, which errs in the direction of taps landing.
+ */
+export const TOUCH_TAP_SLOP = 18;
+
+/**
+ * A spread too small to divide by, in framebuffer pixels.
+ *
+ * Two fingers can genuinely occupy (nearly) one point, and the zoom factor is a
+ * RATIO of spreads -- so a near-zero baseline would turn a one-pixel twitch
+ * into a 100x zoom. Below this the gesture still pans; it just stops claiming
+ * to know anything about scale.
+ */
+const MIN_SPREAD = 8;
 
 /**
  * Accumulates input events and freezes one `InputState` per frame.
@@ -76,6 +103,39 @@ export class InputTracker {
   private rightPressed = false;
 
   private scroll = 0;
+
+  // --- touch -----------------------------------------------------------
+  //
+  // Touch reaches the frozen state through exactly two doors: a single finger
+  // IS the left button (tap = press, a drag past the slop = the held button),
+  // and two or more fingers are the CAMERA -- pan by centroid, zoom by spread.
+  //
+  // THE CAMERA CLAIM IS A LATCH. The moment a second finger lands, the whole
+  // touch sequence belongs to the camera until every finger lifts -- including
+  // any finger that remains after the pinch partner leaves, which keeps
+  // panning. The alternative -- handing the survivor back to the tool -- ends
+  // every pinch with an accidental stroke from whichever finger lifted second,
+  // which on the Draw tool means a smear across the field you just framed.
+  //
+  // THE BASELINE RESETS ON EVERY COUNT CHANGE. Pan and zoom are measured
+  // between successive events at the SAME finger count; a finger landing or
+  // lifting teleports the centroid, and measuring across that boundary would
+  // fling the view. `rebaseTouch()` at every down/up is what makes those
+  // transitions seamless rather than a lurch.
+
+  /** Live canvas-owned fingers, by pointer id, in framebuffer pixels. */
+  private readonly touches = new Map<number, readonly [number, number]>();
+  /** The latch: this touch sequence belongs to the camera, tools stay out. */
+  private touchCamera = false;
+  /** Where the lone finger landed; the reference the tap slop measures from. */
+  private touchStart: readonly [number, number] | null = null;
+  /** The lone finger left the slop, so its release is not a tap. */
+  private touchMoved = false;
+  /** Previous centroid/spread; `null` right after a count change. */
+  private touchBase: { centroid: readonly [number, number]; spread: number } | null = null;
+  /** Per-frame accumulators, drained by `freeze()` like `scroll`. */
+  private pinchPan: [number, number] = [0, 0];
+  private pinchZoom = 1;
 
   // --- keyboard --------------------------------------------------------
   private readonly keysHeld = new Set<string>();
@@ -133,6 +193,146 @@ export class InputTracker {
     } else if (button === RIGHT_BUTTON) {
       this.rightDown = false;
     }
+  }
+
+  /**
+   * A finger landed. `capturedByUi` follows ASYMMETRY 1 exactly as a mouse
+   * press does: a finger that lands on the panel is the panel's, records
+   * nothing, and -- because it is never entered into `touches` -- its moves
+   * and its release are ignored without any of them having to re-check.
+   */
+  onTouchDown(pointerId: number, x: number, y: number, capturedByUi: boolean): void {
+    if (capturedByUi) return;
+    this.touches.set(pointerId, [x, y]);
+
+    if (this.touches.size === 1) {
+      // The tool finger. The cursor follows it from the DOWN, as a mouse press
+      // does, so a tap picks at the right place -- but `leftPressed` waits for
+      // the release and `leftDown` waits for the slop (see TOUCH_TAP_SLOP).
+      this.touchCamera = false;
+      this.touchStart = [x, y];
+      this.touchMoved = false;
+      this.mouseX = x;
+      this.mouseY = y;
+    } else {
+      // A second finger: the sequence is the camera's now, whatever it was.
+      // Ending the tool drag here is a RELEASE in the asymmetry-2 sense --
+      // never filtered, always honoured -- so the tool sees the finger lift
+      // and the stroke it was drawing ends where the pinch began.
+      this.leftDown = false;
+      this.touchCamera = true;
+      this.touchStart = null;
+    }
+    this.rebaseTouch();
+  }
+
+  /** A finger moved. Unknown ids -- captured presses -- fall through silently. */
+  onTouchMove(pointerId: number, x: number, y: number): void {
+    if (!this.touches.has(pointerId)) return;
+    this.touches.set(pointerId, [x, y]);
+
+    if (this.touchCamera) {
+      const centroid = this.touchCentroid();
+      const spread = this.touchSpread(centroid);
+      if (this.touchBase !== null) {
+        this.pinchPan[0] += centroid[0] - this.touchBase.centroid[0];
+        this.pinchPan[1] += centroid[1] - this.touchBase.centroid[1];
+        // A ratio needs two real fingers and a baseline it can divide by.
+        if (this.touches.size >= 2 && this.touchBase.spread > MIN_SPREAD && spread > MIN_SPREAD) {
+          this.pinchZoom *= spread / this.touchBase.spread;
+        }
+      }
+      this.touchBase = { centroid, spread };
+      return;
+    }
+
+    // The tool finger: the cursor tracks it, and the slop decides when the
+    // movement stops being a tap and becomes the held left button.
+    this.mouseX = x;
+    this.mouseY = y;
+    if (!this.touchMoved && this.touchStart !== null) {
+      const dx = x - this.touchStart[0];
+      const dy = y - this.touchStart[1];
+      if (dx * dx + dy * dy > TOUCH_TAP_SLOP * TOUCH_TAP_SLOP) {
+        this.touchMoved = true;
+        this.leftDown = true;
+      }
+    }
+  }
+
+  /**
+   * A finger lifted -- or the browser took it away (`pointercancel` routes
+   * here too; a finger the platform reclaimed is gone either way).
+   *
+   * The tap fires HERE, on the release, which is what the slop machinery
+   * defers it for: only a sequence that stayed one finger and stayed inside
+   * the slop was ever a tap, and by the release both facts are known.
+   */
+  onTouchUp(pointerId: number): void {
+    if (!this.touches.delete(pointerId)) return;
+
+    if (this.touches.size === 0) {
+      if (!this.touchCamera && !this.touchMoved) {
+        this.leftPressed = true;
+      }
+      this.leftDown = false;
+      this.touchCamera = false;
+      this.touchStart = null;
+      this.touchMoved = false;
+    }
+    this.rebaseTouch();
+  }
+
+  /**
+   * The browser took a finger away (`pointercancel`).
+   *
+   * Same bookkeeping as a lift with ONE difference: a reclaimed finger is not
+   * a tap. The user did not choose the release -- the platform did, mid
+   * system-gesture or incoming alert -- and a pick firing from that would be a
+   * selection nobody made. Poisoning the tap flag before delegating is enough:
+   * everything else about "this finger is gone" is identical.
+   */
+  onTouchCancel(pointerId: number): void {
+    if (!this.touches.has(pointerId)) return;
+    this.touchMoved = true;
+    this.onTouchUp(pointerId);
+  }
+
+  /** Forget the between-events baseline; the next move measures from itself. */
+  private rebaseTouch(): void {
+    if (this.touchCamera && this.touches.size > 0) {
+      const centroid = this.touchCentroid();
+      this.touchBase = { centroid, spread: this.touchSpread(centroid) };
+    } else {
+      this.touchBase = null;
+    }
+  }
+
+  /** Mean position of the live fingers. Callers guarantee at least one. */
+  private touchCentroid(): readonly [number, number] {
+    let x = 0;
+    let y = 0;
+    for (const [px, py] of this.touches.values()) {
+      x += px;
+      y += py;
+    }
+    const n = this.touches.size;
+    return [x / n, y / n];
+  }
+
+  /**
+   * Mean distance of the fingers from their centroid.
+   *
+   * Defined for ANY finger count -- zero for one -- rather than the distance
+   * between "the" two fingers, so a third finger landing mid-pinch degrades
+   * into a slightly different scale reading instead of a special case.
+   */
+  private touchSpread(centroid: readonly [number, number]): number {
+    let sum = 0;
+    for (const [px, py] of this.touches.values()) {
+      sum += Math.hypot(px - centroid[0], py - centroid[1]);
+    }
+    return this.touches.size > 0 ? sum / this.touches.size : 0;
   }
 
   /**
@@ -195,6 +395,16 @@ export class InputTracker {
     this.keysPressed.clear();
     this.leftDown = false;
     this.rightDown = false;
+    // Fingers too: a tab losing focus mid-gesture may never see the ups, and a
+    // ghost entry in `touches` would make the next real finger a "second" one
+    // -- every future tap silently latching the camera.
+    this.touches.clear();
+    this.touchCamera = false;
+    this.touchStart = null;
+    this.touchMoved = false;
+    this.touchBase = null;
+    this.pinchPan = [0, 0];
+    this.pinchZoom = 1;
   }
 
   /**
@@ -213,6 +423,18 @@ export class InputTracker {
    * so draining cannot reach back into a state a consumer still holds.
    */
   freeze(dt: number): InputState {
+    // Live while the latch holds and fingers remain: a pinch that did not move
+    // this frame still reports (with zero deltas), because "fingers are on the
+    // glass" is a condition the tool layer reads, not an event.
+    const pinch: PinchState | null =
+      this.touchCamera && this.touches.size > 0
+        ? {
+            centroid: this.touchCentroid(),
+            panPixels: [this.pinchPan[0], this.pinchPan[1]],
+            zoomFactor: this.pinchZoom,
+          }
+        : null;
+
     const state: InputState = {
       mousePos: [this.mouseX, this.mouseY],
       dt,
@@ -221,6 +443,7 @@ export class InputTracker {
       leftDragging: this.leftDown,
       rightDragging: this.rightDown,
       scroll: this.scroll,
+      pinch,
       keysHeld: new Set(this.keysHeld),
       keysPressed: new Set(this.keysPressed),
       shift: this.shift,
@@ -229,6 +452,10 @@ export class InputTracker {
     this.leftPressed = false;
     this.rightPressed = false;
     this.scroll = 0;
+    // The gesture DELTAS drain like scroll; the gesture ITSELF is a condition
+    // and persists until the fingers say otherwise.
+    this.pinchPan = [0, 0];
+    this.pinchZoom = 1;
     this.keysPressed.clear();
 
     return state;

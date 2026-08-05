@@ -41,6 +41,28 @@
  *     wanting to, the filtering belongs upstream.
  */
 
+/**
+ * One frame of the two-finger camera gesture.
+ *
+ * Deltas rather than absolutes, for the same reason `scroll` is: the tracker
+ * accumulates within the frame (`+=` for pan, `*=` for zoom) so a fast gesture
+ * that delivers three moves between two frames is worth all three, and
+ * `freeze()` drains them. The consumer applies the deltas through the camera's
+ * own methods and never needs to know where the fingers started.
+ */
+export interface PinchState {
+  /**
+   * Where the gesture is anchored: the touch centroid, framebuffer pixels.
+   * The zoom pins the world point under this, exactly as wheel zoom pins the
+   * point under the cursor.
+   */
+  readonly centroid: readonly [number, number];
+  /** Centroid movement this frame, framebuffer pixels. */
+  readonly panPixels: readonly [number, number];
+  /** Spread ratio this frame. `1` means the fingers did not converge or part. */
+  readonly zoomFactor: number;
+}
+
 /** One frame's input, already filtered for UI capture. */
 export interface InputState {
   /** Cursor position in framebuffer pixels, top-left origin. */
@@ -95,6 +117,21 @@ export interface InputState {
   readonly keysPressed: ReadonlySet<string>;
 
   /**
+   * The two-finger camera gesture, or `null` when none is live.
+   *
+   * `null` and not a zeroed value, so consumers can distinguish "no gesture"
+   * from "a gesture that happens not to have moved this frame" -- the latter
+   * still means fingers are on the glass and the tool layer stays out of it.
+   *
+   * Touch only ever reaches the frozen state as this field or as the
+   * left-button fields (a single finger IS the left button; see
+   * `inputTracker.ts`). There is deliberately no touch analogue of the right
+   * button: every right-button gesture has a two-finger future, and inventing
+   * one per tool now would pre-empt that design with three ad-hoc ones.
+   */
+  readonly pinch: PinchState | null;
+
+  /**
    * Shift, from the most recent key event. The trimmed port of `mods`.
    *
    * Only Shift, because the hotkey table is deliberately Ctrl-free (see
@@ -121,6 +158,7 @@ export const EMPTY_INPUT: InputState = Object.freeze({
   leftDragging: false,
   rightDragging: false,
   scroll: 0,
+  pinch: null,
   keysHeld: Object.freeze(new Set<string>()),
   keysPressed: Object.freeze(new Set<string>()),
   shift: false,

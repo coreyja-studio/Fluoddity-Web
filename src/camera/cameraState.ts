@@ -145,14 +145,63 @@ export class CameraState {
     canvasSize: CanvasSize,
   ): void {
     if (!notches) return;
+    this.zoomFactorAtPixel(ZOOM_PER_NOTCH ** notches, pixel, windowSize, canvasSize);
+  }
+
+  /**
+   * Zoom by a raw FACTOR, keeping the world point under `pixel` fixed.
+   *
+   * The factor form of `zoomAtPixel`, and the one a pinch speaks natively: a
+   * spread ratio IS a magnification factor, and converting it to notches only
+   * to raise `ZOOM_PER_NOTCH` back to a factor would be two logs for nothing.
+   * The wheel path delegates here, so the anchor arithmetic exists once.
+   *
+   * A non-positive or non-finite factor is REJECTED, same posture as
+   * `setZoom`: the plausible source is a degenerate gesture (two fingers on
+   * one point), and a zoom of zero would not clamp -- it would put the view at
+   * MIN_ZOOM with the anchor correction computed against nonsense.
+   */
+  zoomFactorAtPixel(
+    factor: number,
+    pixel: Vec2,
+    windowSize: WindowSize,
+    canvasSize: CanvasSize,
+  ): void {
+    if (factor === 1.0 || !Number.isFinite(factor) || factor <= 0) return;
     // NOTE screenToWorld's argument order: pixel, WINDOW, CANVAS.
     const before = screenToWorld(pixel, windowSize, canvasSize, this.pan, this.zoom);
-    this.setZoom(this.zoom * ZOOM_PER_NOTCH ** notches);
+    this.setZoom(this.zoom * factor);
     const after = screenToWorld(pixel, windowSize, canvasSize, this.pan, this.zoom);
     this.pan = [
       this.pan[0] + (before[0] - after[0]),
       this.pan[1] + (before[1] - after[1]),
     ];
+  }
+
+  /**
+   * Pan so the world FOLLOWS a pointer that moved by `deltaPixels`.
+   *
+   * The touch gesture: content sticks to the fingers, so a centroid that moved
+   * right must carry the world right with it -- which moves `pan` (the world
+   * point at the view's center) the OTHER way, by however much world distance
+   * those pixels span at the current zoom.
+   *
+   * Composed from `screenToWorld` at two pixels rather than from a hand-rolled
+   * pixels-to-world scale (rule 9: compose the chain, never re-derive it). The
+   * transform is affine, so WHICH pixel anchors the pair is irrelevant; the
+   * difference isolates exactly the letterbox, zoom and y-flip factors that a
+   * re-derivation would get subtly wrong.
+   */
+  panByPixels(
+    deltaPixels: Vec2,
+    windowSize: WindowSize,
+    canvasSize: CanvasSize,
+  ): void {
+    const [dx, dy] = deltaPixels;
+    if ((dx === 0 && dy === 0) || !Number.isFinite(dx) || !Number.isFinite(dy)) return;
+    const at = screenToWorld([0, 0], windowSize, canvasSize, this.pan, this.zoom);
+    const from = screenToWorld([-dx, -dy], windowSize, canvasSize, this.pan, this.zoom);
+    this.pan = [this.pan[0] + (from[0] - at[0]), this.pan[1] + (from[1] - at[1])];
   }
 
   /**
