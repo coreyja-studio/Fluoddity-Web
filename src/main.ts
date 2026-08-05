@@ -419,10 +419,19 @@ async function start(): Promise<void> {
       // `vv` is the pinch-zoom scale of the PAGE itself: anything other than
       // 1.00 means iOS is panning a zoomed viewport instead of delivering
       // drags, and no amount of event handling can win that.
+      //
+      // The second line is the SIMULATION'S vitals, because a healthy input
+      // layer feeding a paused or miscalibrated simulation looks identical
+      // from the outside: `frames` advancing is the real "it is alive", and
+      // `paused` is the flag that silently no-ops Shove and Draw while
+      // leaving Select working -- exactly the asymmetry that sent us here.
+      const d = orchestrator.diagnostics;
       renderInputTape(
         `drag=${frameInput.leftDragging} press=${frameInput.leftPressed} ` +
           `pinch=${p === null ? '-' : `pan ${p.panPixels.map(Math.round)} z ${p.zoomFactor.toFixed(2)}`} ` +
-          `vv=${(window.visualViewport?.scale ?? 1).toFixed(2)}`,
+          `vv=${(window.visualViewport?.scale ?? 1).toFixed(2)}\n` +
+          `sim: paused=${d.paused} frames=${d.frameCount} steps=${d.physicsSteps} ` +
+          `tool=${d.mouseMode} entities=${d.entityCount}`,
       );
     }
 
