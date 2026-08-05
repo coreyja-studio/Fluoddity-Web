@@ -46,6 +46,33 @@ type Block = string | readonly string[] | typeof DIVIDER;
 
 const HEADING = 'Welcome to Fluoddity!';
 
+/**
+ * Below this, the splash carries a small-screen warning.
+ *
+ * Tested against the viewport's SMALLER dimension, not its width: a phone in
+ * landscape reports a desktop-class width and ~400px of height, so a width
+ * breakpoint waves through exactly the devices this is for. The number is
+ * Android's own phone/tablet boundary (`sw600dp`), which draws the same line
+ * this warning wants -- every phone falls under it, and the smallest iPad
+ * (744) clears it.
+ *
+ * A WARNING, not a gate. The app runs on a phone; it is the 320px panel, the
+ * hover tooltips and the finger-sized hit targets that suffer. Someone
+ * determined to try anyway should get to -- the same posture as the share
+ * link's length warning.
+ */
+export const SMALL_SCREEN_MIN_DIM = 600;
+
+/** Whether a viewport is phone-sized. Pure, so the boundary is testable. */
+export function isSmallScreen(width: number, height: number): boolean {
+  return Math.min(width, height) < SMALL_SCREEN_MIN_DIM;
+}
+
+const SMALL_SCREEN_WARNING =
+  'Heads up: this screen is on the small side for Fluoddity. Everything ' +
+  'works, but the panels and tools are laid out for a tablet or a computer ' +
+  '— on a bigger screen you will have a much better time.';
+
 const BODY: readonly Block[] = [
   'Think of it like an evolvable ant farm, or an interactive lava lamp. ' +
     'Thousands of particles interact through pheromone-like trails left behind ' +
@@ -149,6 +176,8 @@ export class Splash {
   private readonly container: HTMLElement;
   private readonly root: HTMLElement;
   private readonly card: HTMLElement;
+  /** The small-screen banner. Shown or hidden per showing -- see `show()`. */
+  private readonly smallScreen: HTMLElement;
   /** The calibration progress line. Empty and hidden unless something sets it. */
   private readonly status: HTMLElement;
   /** The dismiss hint, which changes while locked -- see `setLocked`. */
@@ -186,7 +215,16 @@ export class Splash {
       'max-width:640px;min-height:0;overflow-y:auto;box-sizing:border-box;' +
       'padding:24px 28px;border:1px solid rgba(255,255,255,0.15);' +
       'border-radius:6px;background:rgba(28,28,30,0.98);cursor:auto;';
-    this.card.append(...render());
+    // First thing inside the card, above the heading: a caveat about the
+    // device belongs before the sales pitch for the app. Hidden until `show()`
+    // measures a viewport that earns it.
+    this.smallScreen = document.createElement('p');
+    this.smallScreen.textContent = SMALL_SCREEN_WARNING;
+    this.smallScreen.style.cssText =
+      'display:none;margin:0 0 14px;padding:10px 12px;border-radius:4px;' +
+      'border:1px solid rgba(255,196,0,0.35);background:rgba(255,196,0,0.08);' +
+      'color:#ffd97a;';
+    this.card.append(this.smallScreen, ...render());
 
     // OUTSIDE the card, so it stays visible no matter how far the copy scrolls.
     const hint = document.createElement('div');
@@ -243,6 +281,14 @@ export class Splash {
   show(): void {
     if (this.shown) return;
     this.shown = true;
+    // Measured PER SHOWING rather than once at construction: the answer can
+    // change (a rotated phone stays small, a resized desktop window does not),
+    // and each showing should describe the screen it is actually on. Not
+    // re-measured live on resize -- the one gesture that changes it mid-view
+    // is a rotation, where the banner's answer is the same either way.
+    this.smallScreen.style.display = isSmallScreen(window.innerWidth, window.innerHeight)
+      ? ''
+      : 'none';
     this.card.scrollTop = 0;
     this.container.append(this.root);
     // Bound only while visible, so a dismissed splash costs nothing per
